@@ -52,6 +52,17 @@ parse JSON scan results; it can be used to process the results of SSLyze scans i
 
    json-output
 
+Exporting and processing scan results in SARIF
+***********************************************
+
+SSLyze can also emit an opt-in SARIF 2.1.0 document for security dashboards and
+code-scanning platforms.
+
+.. toctree::
+   :maxdepth: 2
+
+   sarif-output
+
 
 Appendix: Scan Commands
 ***********************

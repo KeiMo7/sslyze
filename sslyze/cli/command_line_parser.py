@@ -1,5 +1,5 @@
 import pydantic
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -48,6 +48,15 @@ class TrustStoresUpdateCompleted(CommandLineParsingError):
 
 
 @dataclass(frozen=True)
+class SarifTargetLocation:
+    """The position of a scan target in the file or synthetic list that defined it."""
+
+    source_path: Path
+    line_number: int
+    line_text: str
+
+
+@dataclass(frozen=True)
 class ParsedCommandLine:
     """The result of parsing a command line used to launch sslyze."""
 
@@ -70,6 +79,11 @@ class ParsedCommandLine:
     # Check the server against a specific TLS configuration
     tls_config_to_check_against_as_enum: Optional[TlsConfigurationEnum]  # None if shouldn't be run
     tls_config_to_check_against: Optional[TlsConfigurationAsJson]
+
+    # SARIF output settings and target source locations
+    sarif_path_out: Optional[Path] = None
+    sarif_server_locations: List[SarifTargetLocation] = field(default_factory=list)
+    sarif_invalid_server_locations: List[SarifTargetLocation] = field(default_factory=list)
 
 
 _STARTTLS_PROTOCOL_DICT = {
@@ -126,26 +140,61 @@ class CommandLineParser:
     def parse_command_line(self) -> ParsedCommandLine:
         """Parses the command line used to launch SSLyze."""
         args_command_list = self._parser.parse_args()
-        args_target_list = []
+        args_target_list: List[Tuple[str, Optional[SarifTargetLocation]]] = []
 
         if args_command_list.update_trust_stores:
             # Just update the trust stores and do nothing
             TrustStoresRepository.update_default()
             raise TrustStoresUpdateCompleted()
 
+        # Handle SARIF settings early because target source locations are only collected when SARIF is enabled.
+        sarif_path_out: Optional[Path] = None
+        if args_command_list.sarif_file:
+            if args_command_list.sarif_file == "-":
+                raise CommandLineParsingError("SARIF output must be written to a file; '-' is not supported.")
+            sarif_path_out = Path(args_command_list.sarif_file).absolute()
+
         # Handle the --targets_in command line and fill args_target_list
         if args_command_list.targets_in:
+            targets_in_path = Path(args_command_list.targets_in)
             try:  # Read targets from a file
-                with open(args_command_list.targets_in) as f:
-                    for target in f.readlines():
+                with open(args_command_list.targets_in, encoding="utf-8", errors="surrogateescape") as f:
+                    for line_number, target in enumerate(f.readlines(), start=1):
                         if target.strip():  # Ignore empty lines
                             if not target.startswith("#"):  # Ignore comment lines
-                                args_target_list.append(target.strip())
+                                args_target_list.append(
+                                    (
+                                        target.strip(),
+                                        (
+                                            SarifTargetLocation(
+                                                source_path=targets_in_path,
+                                                line_number=line_number,
+                                                line_text=target.rstrip("\r\n"),
+                                            )
+                                            if sarif_path_out
+                                            else None
+                                        ),
+                                    )
+                                )
             except IOError:
                 raise CommandLineParsingError(f"Can't read targets from input file '{args_command_list.targets_in}'")
 
-        for target in args_command_list.target:
-            args_target_list.append(target)
+        command_line_targets_path = Path("sslyze-targets.txt")
+        for line_number, target in enumerate(args_command_list.target, start=1):
+            args_target_list.append(
+                (
+                    target,
+                    (
+                        SarifTargetLocation(
+                            source_path=command_line_targets_path,
+                            line_number=line_number,
+                            line_text=target,
+                        )
+                        if sarif_path_out
+                        else None
+                    ),
+                )
+            )
 
         if not args_target_list:
             raise CommandLineParsingError("No targets to scan.")
@@ -256,7 +305,9 @@ class CommandLineParser:
         # Create the server location objects for each specified servers
         good_servers: List[Tuple[ServerNetworkLocation, ServerNetworkConfiguration]] = []
         invalid_server_strings: List[InvalidServerStringError] = []
-        for server_string in args_target_list:
+        sarif_server_locations: List[SarifTargetLocation] = []
+        sarif_invalid_server_locations: List[SarifTargetLocation] = []
+        for server_string, target_location in args_target_list:
             try:
                 # Parse the string supplied via the CLI for this server
                 (
@@ -267,6 +318,8 @@ class CommandLineParser:
             except InvalidServerStringError as e:
                 # The server string is malformed
                 invalid_server_strings.append(e)
+                if target_location:
+                    sarif_invalid_server_locations.append(target_location)
                 continue
 
             # If not port number was supplied, assume 443
@@ -304,6 +357,8 @@ class CommandLineParser:
                                 error_message=f"Could not resolve hostname {hostname}",
                             )
                         )
+                        if target_location:
+                            sarif_invalid_server_locations.append(target_location)
                         continue
 
             # Figure out extra network config for this server
@@ -329,6 +384,8 @@ class CommandLineParser:
                     xmpp_to_hostname=args_command_list.xmpp_to,
                 )
                 good_servers.append((server_location, network_config))
+                if target_location:
+                    sarif_server_locations.append(target_location)
             except InvalidServerNetworkConfigurationError as e:
                 raise CommandLineParsingError(e.args[0])
 
@@ -369,6 +426,9 @@ class CommandLineParser:
             per_server_concurrent_connections_limit=per_server_concurrent_connections_limit,
             tls_config_to_check_against_as_enum=tls_config_to_check_against_as_enum,
             tls_config_to_check_against=tls_config_to_check_against,
+            sarif_path_out=sarif_path_out,
+            sarif_server_locations=sarif_server_locations,
+            sarif_invalid_server_locations=sarif_invalid_server_locations,
         )
 
     def _add_default_options(self) -> None:
@@ -427,6 +487,16 @@ class CommandLineParser:
             "See https://nabla-c0d3.github.io/sslyze/documentation/available-scan-commands.html "
             "for more details.",
             dest="json_file",
+            default=None,
+        )
+        # SARIF output
+        input_and_output_group.add_argument(
+            "--sarif_out",
+            metavar="SARIF_FILE",
+            help="Write the scan results as a SARIF 2.1.0 document to SARIF_FILE. Findings are linked to the "
+            "targets file supplied with --targets_in, or to a synthetic sslyze-targets.txt file when targets are "
+            "supplied directly on the command line.",
+            dest="sarif_file",
             default=None,
         )
         # Read targets from input file

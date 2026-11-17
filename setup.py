@@ -92,6 +92,7 @@ setup(
     packages=find_packages(include=["sslyze", "sslyze.*"]),
     package_data={
         "sslyze": ["py.typed"],
+        "sslyze.json": ["sarif-schema-2.1.0.json"],
         "sslyze.plugins.certificate_info.trust_stores": ["pem_files/*.pem", "pem_files/*.yaml"],
         "sslyze.mozilla_tls_profile": ["5.7.json"],
     },
@@ -100,6 +101,7 @@ setup(
     install_requires=[
         "nassl>=5.4,<6",
         "cryptography>=43,<51",
+        "jsonschema>=4,<5",
         "tls-parser>=2,<3",
         "pydantic>=2.3,<3",
     ],

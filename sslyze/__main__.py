@@ -1,10 +1,12 @@
 import sys
+from contextlib import ExitStack
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, TextIO
 
 from sslyze.cli.console_output import ObserverToGenerateConsoleOutput
 from sslyze.__version__ import __version__
-from sslyze.cli.command_line_parser import CommandLineParsingError, CommandLineParser
+from sslyze.cli.command_line_parser import CommandLineParsingError, CommandLineParser, SarifTargetLocation
 
 from sslyze import (
     Scanner,
@@ -49,24 +51,75 @@ def main() -> None:
         observers=scanner_observers,
     )
 
-    # Queue the scans
-    all_server_scan_requests = []
-    for server_location, network_config in parsed_command_line.servers_to_scans:
-        scan_request = ServerScanRequest(
-            server_location=server_location,
-            network_configuration=network_config,
-            scan_commands=parsed_command_line.scan_commands,
-            scan_commands_extra_arguments=parsed_command_line.scan_commands_extra_arguments,
-        )
-        all_server_scan_requests.append(scan_request)
-
-    # If there are servers that we were able to resolve, scan them
     all_server_scan_results = []
-    if all_server_scan_requests:
-        sslyze_scanner.queue_scans(all_server_scan_requests)
-        for result in sslyze_scanner.get_results():
-            # Results are actually displayed by the observer; here we just store them
-            all_server_scan_results.append(result)
+    with ExitStack() as output_stack:
+        sarif_writer = None
+        if parsed_command_line.sarif_path_out:
+            # Imported lazily so the default output path does not pay for SARIF dependencies.
+            from sslyze.json.sarif_output import SarifOutputWriter, repository_root_for
+
+            sarif_writer = output_stack.enter_context(
+                SarifOutputWriter(
+                    parsed_command_line.sarif_path_out,
+                    source_root=repository_root_for(Path.cwd()),
+                    start_time=date_scans_started,
+                )
+            )
+            for index, invalid_server in enumerate(parsed_command_line.invalid_servers):
+                invalid_location = (
+                    parsed_command_line.sarif_invalid_server_locations[index]
+                    if index < len(parsed_command_line.sarif_invalid_server_locations)
+                    else SarifTargetLocation(
+                        source_path=Path("sslyze-targets.txt"),
+                        line_number=index + 1,
+                        line_text=invalid_server.server_string,
+                    )
+                )
+                sarif_writer.write_invalid_server(
+                    invalid_server.server_string,
+                    invalid_server.error_message,
+                    source_path=invalid_location.source_path,
+                    line_number=invalid_location.line_number,
+                    line_text=invalid_location.line_text,
+                )
+
+        # Queue the scans
+        all_server_scan_requests = []
+        sarif_target_locations_by_request_uuid = {}
+        for index, (server_location, network_config) in enumerate(parsed_command_line.servers_to_scans):
+            scan_request = ServerScanRequest(
+                server_location=server_location,
+                network_configuration=network_config,
+                scan_commands=parsed_command_line.scan_commands,
+                scan_commands_extra_arguments=parsed_command_line.scan_commands_extra_arguments,
+            )
+            all_server_scan_requests.append(scan_request)
+            if index < len(parsed_command_line.sarif_server_locations):
+                sarif_target_locations_by_request_uuid[scan_request.uuid] = parsed_command_line.sarif_server_locations[
+                    index
+                ]
+
+        # If there are servers that we were able to resolve, scan them
+        if all_server_scan_requests:
+            sslyze_scanner.queue_scans(all_server_scan_requests)
+            for result in sslyze_scanner.get_results():
+                # Results are actually displayed by the observer; here we just store them
+                all_server_scan_results.append(result)
+
+                if sarif_writer:
+                    target_location = sarif_target_locations_by_request_uuid.get(result.uuid)
+                    if target_location is None:
+                        target_location = SarifTargetLocation(
+                            source_path=Path("sslyze-targets.txt"),
+                            line_number=len(all_server_scan_results),
+                            line_text=result.server_location.display_string,
+                        )
+                    sarif_writer.write_server_scan_result(
+                        result,
+                        source_path=target_location.source_path,
+                        line_number=target_location.line_number,
+                        line_text=target_location.line_text,
+                    )
 
     # Write results to a JSON file if needed
     json_file_out: Optional[TextIO] = None

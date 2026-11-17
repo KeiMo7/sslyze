@@ -8,6 +8,7 @@ twine>=4,<5
 sphinx-autodoc-typehints
 pytest-cov
 faker
+jsonschema>=4,<5
 
 # For building the Windows executable; cx-freeze is not compatible with Python 3.12 yet
 cx-freeze==6.15.15; sys.platform == 'win32' and python_version < '3.12'

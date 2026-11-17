@@ -97,6 +97,17 @@ See `custom_tls_config_example.json` for an example a custom TLS configuration t
 
 **This functionality can be used to easily run an SSLyze scan as a CI/CD step in order to ensure TLS compliance.**
 
+### SARIF output
+
+For security dashboards that consume SARIF 2.1.0, add `--sarif_out`:
+
+```bash
+python -m sslyze --targets_in=targets.txt --sarif_out=sslyze.sarif
+```
+
+SARIF output is opt-in and does not change the existing console or `--json_out` output. See
+`docs/sarif-output.rst` for location semantics, severity mapping and validation details.
+
 Development environment
 -----------------------
 
